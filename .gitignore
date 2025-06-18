@@ -45,3 +45,4 @@ bin/
 .DS_Store
 .env.properties
 .venv/*
+/docker_error.log

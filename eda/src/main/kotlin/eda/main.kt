@@ -10,59 +10,48 @@ import ai.koog.agents.features.eventHandler.feature.handleEvents
 import ai.koog.book.utils.simpleGrazieExecutor
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import kotlin.system.exitProcess
+
+private const val PYTHON_KERNEL_PATH = "eda/src/main/kernel"
 
 fun main() = runBlocking {
-    println("### Welcome to the EDA Agent ###")
-    print("Please provide the path to your CSV file: ")
-    val dataFilePath = readlnOrNull()?.trim()
-
-    if (dataFilePath.isNullOrBlank()) {
-        println("Error: No file path provided.")
-        return@runBlocking
+    // --- Kernel Process Setup ---
+    if (!File(PYTHON_KERNEL_PATH).exists()) {
+        println("FATAL ERROR: Python kernel script not found at '$PYTHON_KERNEL_PATH'.")
+        println("Please save the `kernel.py` file and update the PYTHON_KERNEL_PATH constant in `EdaAgent.kt`.")
+        exitProcess(1)
     }
 
-    val dataFile = File(dataFilePath)
-    if (!dataFile.exists() || !dataFile.isFile) {
-        println("Error: File not found or is not a valid file at '$dataFilePath'")
-        return@runBlocking
-    }
+    val process = ProcessBuilder("python", "-u", PYTHON_KERNEL_PATH)
+        .start()
 
-    // TODO Provide the dataset's schema (column headers) to the LLM for context.
-    val header = dataFile.bufferedReader().use { it.readLine() }
-    val systemPrompt = """
-        You are an expert data analysis assistant. 
-        A pandas DataFrame named 'df' has been loaded with data from a CSV file.
-        The file has the following columns: $header
-        
-        Your task is to answer the user's questions about this dataset.
-        To do this, you MUST use the `pandas_executor` tool to write and execute Python code.
-        Analyze the user's question, write the appropriate pandas code, and call the tool.
-        
-        If the tool returns an error, analyze the error and call the tool again with corrected code.
-        
-        When you have the final answer, provide a clear, natural language response to the user. Do not call any tools in your final response.
-    """.trimIndent()
+    val kernelInput = process.outputStream
+    val kernelOutput = process.inputStream.bufferedReader()
 
+    // --- Agent Setup ---
+    val agentContext = AgentContext()
+    val toolset = EdaTools(agentContext, kernelInput, kernelOutput)
     val toolRegistry = ToolRegistry {
-        tools(EdaTools(dataFilePath).asTools())
+        tools(toolset.asTools())
     }
 
     val apiKey = System.getenv("GRAZIE_TOKEN") ?: run {
-        println("Error: OPENAI_API_KEY environment variable not set.")
+        println("Error: GRAZIE_TOKEN environment variable not set.")
+        process.destroy()
         return@runBlocking
     }
 
     val agent = AIAgent(
         executor = simpleGrazieExecutor(apiKey),
         llmModel = JetBrainsAIModels.OpenAI.GPT4o,
-        systemPrompt = systemPrompt,
+        systemPrompt = "You are a helpful data analysis assistant.", // This will be replaced dynamically.
         toolRegistry = toolRegistry,
         strategy = edaStrategy()
     ) {
         handleEvents {
-            onToolCall { tool: Tool<*, *>, toolArgs: ToolArgs ->
-                println("--- Calling Tool: ${tool.name} ---")
-                val code = toolArgs.toString().substringAfter("code=").removeSuffix(")")
+            onToolCall { tool: Tool<*,*>, toolArgs: ToolArgs ->
+                println("\n--- Calling Tool: ${tool.name} ---")
+                println("Args: $toolArgs")
                 println("------------------------------------")
             }
             onAgentFinished { _, result ->
@@ -73,18 +62,74 @@ fun main() = runBlocking {
         }
     }
 
+    // --- REPL Start ---
+    println("### Interactive EDA Agent ###")
+    println("Commands: :add-data <path>, :add-context <path>, :list, :exit")
+
     while (true) {
-        print("Ask a question about your data (or type 'exit' to quit): ")
-        val userInput = readlnOrNull()
-        if (userInput.isNullOrBlank() || userInput.equals("exit", ignoreCase = true)) {
-            break
-        }
-        try {
-            agent.run(userInput)
-        } catch (e: Exception) {
-            println("An unexpected error occurred: ${e.message}")
+        print("> ")
+        val userInput = readlnOrNull()?.trim() ?: break
+
+        when {
+            userInput.equals(":exit", ignoreCase = true) -> break
+
+            userInput.startsWith(":add-data ") -> {
+                val path = userInput.substringAfter(":add-data ").trim()
+                println(toolset.load_data(path))
+            }
+
+            userInput.startsWith(":add-context ") -> {
+                val pathStr = userInput.substringAfter(":add-context ").trim()
+                val file = File(pathStr)
+                if (!file.exists()) {
+                    println("Error: File or directory not found at '$pathStr'")
+                } else {
+                    agentContext.contextFiles[file.name] = file.absolutePath
+                    println("Added context file: '${file.name}'")
+                }
+            }
+
+            userInput.equals(":list", ignoreCase = true) -> {
+                println(toolset.list_context())
+            }
+
+            else -> {
+                if (userInput.isBlank()) continue
+
+                // Dynamically build the system prompt with the latest context
+                val dynamicSystemPrompt = buildString {
+                    appendLine("You are an expert data analysis assistant.")
+                    if (agentContext.dataFiles.isNotEmpty()) {
+                        appendLine("\nThe following data has been loaded into pandas DataFrames:")
+                        agentContext.dataFiles.forEach { (name, path) ->
+                            appendLine("- A DataFrame named `$name` from file `$path`.")
+                        }
+                    }
+                    if (agentContext.contextFiles.isNotEmpty()) {
+                        appendLine("\nThe following context files are available for reading:")
+                        agentContext.contextFiles.forEach { (name, _) ->
+                            appendLine("- `$name`")
+                        }
+                        appendLine("Use the `read_file` tool to inspect their contents when necessary.")
+                    }
+                    appendLine("\nYour task is to answer the user's question. Use the available tools to perform your analysis.")
+                }
+
+                // Create a temporary agent with the updated prompt for this specific run
+                val tempAgent = AIAgent(
+                    executor = simpleGrazieExecutor(apiKey),
+                    llmModel = JetBrainsAIModels.OpenAI.GPT4o,
+                    systemPrompt = dynamicSystemPrompt,
+                    toolRegistry = agent.toolRegistry,
+                    strategy = edaStrategy()
+                )
+                tempAgent.run(userInput)
+            }
         }
     }
 
-    println("EDA Agent session finished.")
+    // --- Cleanup ---
+    println("Exiting agent and shutting down kernel...")
+    process.destroy()
+    println("Session finished.")
 }

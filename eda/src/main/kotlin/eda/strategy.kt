@@ -1,39 +1,123 @@
-package eda
-
 import ai.koog.agents.core.agent.entity.AIAgentStrategy
 import ai.koog.agents.core.dsl.builder.forwardTo
 import ai.koog.agents.core.dsl.builder.strategy
-import ai.koog.agents.core.dsl.extension.nodeExecuteTool
-import ai.koog.agents.core.dsl.extension.nodeLLMRequest
-import ai.koog.agents.core.dsl.extension.nodeLLMSendToolResult
-import ai.koog.agents.core.dsl.extension.onAssistantMessage
-import ai.koog.agents.core.dsl.extension.onToolCall
+import ai.koog.agents.core.dsl.extension.*
+import ai.koog.agents.core.feature.AIAgentFeature
+import ai.koog.agents.core.feature.AIAgentPipeline
+import ai.koog.agents.core.agent.entity.AIAgentStorageKey
+import ai.koog.agents.core.agent.entity.createStorageKey
+import ai.koog.agents.core.tools.annotations.LLMDescription
+import ai.koog.agents.core.tools.reflect.asTool
+import ai.koog.agents.ext.agent.ProvideStringSubgraphResult
+import ai.koog.agents.ext.agent.StringSubgraphResult
+import ai.koog.agents.ext.agent.subgraphWithTask
+import ai.koog.prompt.dsl.prompt
+import ai.koog.prompt.structure.json.JsonSchemaGenerator
+import ai.koog.prompt.structure.json.JsonStructuredData
+import kotlinx.serialization.Serializable
+
+// --- Feature to Share AgentContext ---
+class AgentContextFeature(val context: AgentContext) {
+    companion object Feature : AIAgentFeature<AgentContext, AgentContextFeature> {
+        override val key: AIAgentStorageKey<AgentContextFeature> = createStorageKey("agent_context_feature")
+        override fun createInitialConfig() = AgentContext()
+        override fun install(config: AgentContext, pipeline: AIAgentPipeline) {
+            pipeline.interceptContextAgentFeature(this) { AgentContextFeature(config) }
+        }
+    }
+}
+
+// --- Serializable classes for Intent Classification ---
+@Serializable
+enum class UserIntent {
+    LOAD_DATA,
+    ADD_CONTEXT,
+    LIST_CONTEXT,
+    ANALYZE_DATA
+}
+
+@Serializable
+data class ClassifiedIntent(
+    @LLMDescription("The type of action the user wants to perform.")
+    val intent: UserIntent,
+    @LLMDescription("The file path provided by the user, if applicable.")
+    val path: String? = null,
+    @LLMDescription("The user's original question or analysis request, if applicable.")
+    val question: String? = null
+)
 
 /**
- * 1. Call the LLM to get code.
- * 2. Execute the code.
- * 3. Send the results (or errors) back to the LLM.
- * 4. The LLM can then either try generating new code (continuing the loop) or provide a final answer (exiting the loop).
+ * A sophisticated strategy that uses subgraphs to manage different tasks.
  */
-fun edaStrategy(): AIAgentStrategy = strategy("eda_strategy") {
-    val nodeCallLLM by nodeLLMRequest("call_llm_for_code")
-    val nodeExecutePandas by nodeExecuteTool("execute_pandas_code")
-    val nodeSendResultToLLM by nodeLLMSendToolResult("send_tool_result_to_llm")
+fun mainEdaStrategy(): AIAgentStrategy = strategy("main_eda_strategy") {
 
-    edge(nodeStart forwardTo nodeCallLLM)
+    // Subgraph 1: Classify the user's raw input into a structured intent.
+    val classify by subgraph<String, ClassifiedIntent>("classify_intent") {
+        val classifyNode by nodeLLMRequestStructured(
+            structure = JsonStructuredData.createJsonStructure<ClassifiedIntent>(
+                schemaFormat = JsonSchemaGenerator.SchemaFormat.JsonSchema,
+                examples = listOf(
+                    ClassifiedIntent(UserIntent.LOAD_DATA, "/path/to/data.csv"),
+                    ClassifiedIntent(UserIntent.ANALYZE_DATA, question = "what is the average age?")
+                )
+            ),
+            retries = 1,
+            fixingModel = ai.koog.prompt.executor.clients.openai.OpenAIModels.Chat.GPT4o
+        )
+        edge(nodeStart forwardTo classifyNode)
+        edge(classifyNode forwardTo nodeFinish transformed { it.getOrThrow().structure })
+    }
 
-    edge(nodeCallLLM forwardTo nodeExecutePandas onToolCall { true })
+    // Subgraph 2: The main analysis loop, modeled as a task.
+    val analysis by subgraphWithTask<String, StringSubgraphResult>(
+        tools = listOf(EdaTools::pandas_executor, EdaTools::read_file).map { it.asTool() },
+        finishTool = ProvideStringSubgraphResult
+    ) { question ->
+        // This block defines the dynamic system prompt for the analysis task
+        val agentContext = featureOrThrow(AgentContextFeature).context
+        buildString {
+            appendLine("You are an expert data analysis assistant.")
+            if (agentContext.dataFiles.isNotEmpty()) {
+                appendLine("\nThe following data has been loaded into pandas DataFrames:")
+                agentContext.dataFiles.forEach { (name, path) ->
+                    appendLine("- A DataFrame named `$name` from file `$path`.")
+                }
+            }
+            if (agentContext.contextFiles.isNotEmpty()) {
+                appendLine("\nThe following context files are available for reading:")
+                agentContext.contextFiles.forEach { (name, _) ->
+                    appendLine("- `$name`")
+                }
+                appendLine("Use the `read_file` tool to inspect their contents when necessary.")
+            }
+            appendLine("\nYour task is to answer the following user question: \"$question\"")
+            appendLine("Use the available tools to perform your analysis. When you have the final answer, call the `finish_task_execution` tool with the result.")
+        }
+    }
 
-    // If the LLM returns a plain text answer, the task is done.
-    edge(nodeCallLLM forwardTo nodeFinish onAssistantMessage { true })
+    // A simple node to execute a single tool call for context management.
+    val executeContextTool by nodeExecuteTool("execute_context_tool")
 
-    // After executing the code, send the result back to the LLM.
-    edge(nodeExecutePandas forwardTo nodeSendResultToLLM)
+    // --- Main Strategy Workflow ---
 
-    // After the LLM sees the result, it might decide to call the tool again (e.g., to correct an error).
-    edge(nodeSendResultToLLM forwardTo nodeExecutePandas onToolCall { true })
+    // 1. Start by classifying the user's intent.
+    edge(nodeStart forwardTo classify)
 
-    // Or, if the result is good, it will formulate a final text answer and finish.
-    // TODO distinguish good result from failed
-    edge(nodeSendResultToLLM forwardTo nodeFinish onAssistantMessage { true })
+    // 2. Based on intent, route to the correct tool or subgraph.
+    edge(classify forwardTo executeContextTool onToolCall { classifiedIntent ->
+        when (classifiedIntent.intent) {
+            UserIntent.LOAD_DATA -> tool.name == "load_data" && classifiedIntent.path?.let { args.path == it } ?: false
+            UserIntent.ADD_CONTEXT -> tool.name == "add_context" && classifiedIntent.path?.let { args.path == it } ?: false
+            UserIntent.LIST_CONTEXT -> tool.name == "list_context"
+            else -> false
+        }
+    })
+
+    edge(classify forwardTo analysis onAssistantMessage {
+        it.intent == UserIntent.ANALYZE_DATA
+    } transformed { it.question ?: "Perform analysis." })
+
+    // 3. After a context tool or analysis subgraph finishes, the agent's turn is done.
+    edge(executeContextTool forwardTo nodeFinish transformed { it.content })
+    edge(analysis forwardTo nodeFinish transformed { (it as StringSubgraphResult).result })
 }
