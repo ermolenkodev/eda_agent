@@ -13,8 +13,6 @@ import ai.koog.agents.core.agent.entity.createStorageKey
 import ai.koog.agents.core.dsl.builder.forwardTo
 import ai.koog.agents.core.dsl.builder.strategy
 import ai.koog.agents.core.dsl.extension.*
-import ai.koog.agents.core.environment.ReceivedToolResult
-import ai.koog.agents.core.tools.reflect.asTool
 import java.io.File
 
 
@@ -68,12 +66,11 @@ fun mainEdaStrategy(edaTools: EdaTools): AIAgentStrategy = strategy("main_eda_st
 
             appendLine("=== HOW TO WORK ===")
             appendLine("1. Check whether the request is about **data lineage / ETL logic** or about **the data itself**.")
-            appendLine("   • If it’s lineage-related, scan the provided context/code files and extract the relevant facts.")
-            appendLine("   • If it’s data-related, load the dataset(s) and use pandas-compatible Python code.")
+            appendLine("   • If it's lineage-related, immediately scan the provided context/code files and extract the relevant facts without asking for user approval.")
+            appendLine("   • If it's data-related, load the dataset(s) and use pandas-compatible Python code.")
             appendLine("2. Plan the *next* logical action before executing any code. If the goal or inputs are unclear, ask a clarifying question.")
             appendLine("3. When you run Python, ALWAYS show the final answer with `print()`—no print, no credit.")
-            appendLine("4. Keep code blocks minimal: import only what you need, avoid side-effects, and label intermediate prints clearly if they’re useful.")
-            appendLine("5. After code runs, explain results in plain language the user will understand. Include key statistics/insights, not raw dumps.")
+            appendLine("4. Keep code blocks minimal: import only what you need, avoid side-effects, and label intermediate prints clearly if they're useful.")
 
             appendLine("=== BEST-PRACTICE REMINDERS ===")
             appendLine("• Handle missing or suspect values explicitly; note any assumptions.")
@@ -88,7 +85,7 @@ fun mainEdaStrategy(edaTools: EdaTools): AIAgentStrategy = strategy("main_eda_st
             appendLine("Now decide the next logical step and proceed.")
 
             if (agentState.contextFiles.containsKey("guidelines.md")) {
-                appendLine("\nIMPORTANT: Guidelines for analysis is provided. Read them before proceeding. If it contains list of datasets load them with `load_data` tool. If it contains list of context files load them with `add_context` tool but do not read them until user asks question that requires additional context.")
+                appendLine("\nIMPORTANT: Guidelines for analysis is provided. Read them before proceeding. If it contains list of datasets load them with `loadData` tool. If it contains list of context files load them with `add_context` tool and immediately read them if the user's question is about lineage or ETL logic.")
             }
 
             if (agentState.dataFiles.isNotEmpty() || agentState.contextFiles.isNotEmpty()) {
@@ -103,10 +100,20 @@ fun mainEdaStrategy(edaTools: EdaTools): AIAgentStrategy = strategy("main_eda_st
                 if (agentState.metadata.isNotBlank()) {
                     appendLine("\n### KNOWN DATAFRAME METADATA ###")
                     appendLine(agentState.metadata)
-                    appendLine("\nUse this metadata to write your analysis code. Do NOT call `get_dataframe_info` for dataframes if their metadata is already listed above.")
+                    appendLine("\nUse this metadata to write your analysis code. Do NOT call `getDataframeInfo` for dataframes if their metadata is already listed above.")
                 }
 
-                appendLine("You can inspect them with `get_dataframe_info` or `read_file`.")
+                appendLine("You can inspect them with `getDataframeInfo` or `read_file`.")
+                appendLine("\n### ENHANCED FILE READING CAPABILITIES ###")
+                appendLine("The `readFile` tool has been enhanced with specialized capabilities:")
+                appendLine("- For large files (>700 lines), it provides intelligent file analysis with specialized guidance for Python and SQL files")
+                appendLine("- You can search for specific terms or patterns using the `searchTerm` parameter")
+                appendLine("- By default, the tool retrieves 1000 lines of context to provide comprehensive understanding")
+                appendLine("- Variable context window extraction lets you control how many lines before/after matches are shown using `contextBefore` and `contextAfter` parameters (defaults: 50 lines before, 100 lines after)")
+                appendLine("- For Python files: Get specialized guidance on functions, classes, data analysis patterns, pandas operations, etc.")
+                appendLine("- For SQL files: Get specialized guidance on table definitions, queries, joins, filtering, aggregations, etc.")
+                appendLine("- IMPORTANT: Prefer making fewer calls with larger context windows rather than many small calls")
+                appendLine("Example usage: `readFile(\"script.py\", searchTerm=\"def process_data\")`")
             } else {
                 appendLine("\nNo data is currently loaded.")
             }
