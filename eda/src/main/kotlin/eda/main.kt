@@ -17,6 +17,7 @@ import kotlin.system.exitProcess
 
 
 private const val PYTHON_KERNEL_PATH = "eda/src/main/kernel.py"
+const val GUIDELINES_PATH = "eda/src/main/guidelines.md"
 
 
 fun main() = runBlocking {
@@ -54,7 +55,7 @@ fun main() = runBlocking {
             prompt = prompt("eda-agent-base") {
                 system("You are an AI assistant that helps users with data analysis.")
             },
-            model = JetBrainsAIModels.OpenAI.GPT4o,
+            model = JetBrainsAIModels.OpenAI.GPT4_1,
             maxAgentIterations = 500
         ),
         toolRegistry = toolRegistry,
@@ -76,6 +77,17 @@ fun main() = runBlocking {
     println("### Interactive EDA Agent ###")
     println("You can now ask questions or give commands in natural language.")
     println("Examples: 'Load the dataset from ./data/sales.csv', 'what is the average price?', 'exit'")
+
+    if (File(GUIDELINES_PATH).exists()) {
+        println("Found guidelines file. Processing initial commands...")
+        val guidelines = File(GUIDELINES_PATH).readText()
+        try {
+            agent.run(guidelines)
+        } catch (e: Exception) {
+            println("Error processing guidelines: ${e.message}")
+            e.printStackTrace()
+        }
+    }
 
     while (true) {
         print("> ")

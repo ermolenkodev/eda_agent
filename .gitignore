@@ -46,3 +46,4 @@ bin/
 .env.properties
 .venv/*
 /docker_error.log
+/eda/src/main/guidelines.md

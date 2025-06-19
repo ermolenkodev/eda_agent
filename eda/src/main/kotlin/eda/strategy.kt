@@ -15,6 +15,8 @@ import ai.koog.agents.core.dsl.builder.strategy
 import ai.koog.agents.core.dsl.extension.*
 import ai.koog.agents.core.environment.ReceivedToolResult
 import ai.koog.agents.core.tools.reflect.asTool
+import java.io.File
+
 
 @Serializable
 data class FinishTaskArgs(
@@ -43,19 +45,51 @@ fun mainEdaStrategy(edaTools: EdaTools): AIAgentStrategy = strategy("main_eda_st
         input
     }
 
+    val loadGuidelines by node<String, String>("load_guidelines") { input ->
+        val guidelinesFile = File(GUIDELINES_PATH)
+        if (guidelinesFile.exists()) {
+            edaTools.addContext(GUIDELINES_PATH)
+        }
+        input
+    }
+
     val decideNextAction by nodeLLMRequest("decideNextAction")
     val executeAction by nodeExecuteTool("executeAction")
     val sendResultAndLoop by nodeLLMSendToolResult("sendResultAndLoop")
 
     edge(nodeStart forwardTo initState)
-    edge(initState forwardTo decideNextAction transformed { userInput ->
+    edge(initState forwardTo loadGuidelines)
+    edge(loadGuidelines forwardTo decideNextAction transformed { userInput ->
         val agentState = storage.getValue(agentStateKey)
         buildString {
-            appendLine("You are an expert data analyst. Your goal is to answer the user's request: \"$userInput\"")
+            appendLine("You are an expert data analyst and exploratory-data-analysis (EDA) assistant.")
+            appendLine("Your mission is to satisfy the user's request: \"$userInput\".")
             appendLine("To do this, you can load data, inspect it, and execute Python code using the available tools.")
-            appendLine("\nIMPORTANT: Your Python code MUST use the `print()` function to output the final result of any calculation or data lookup. Code that does not use `print()` will produce no output and the analysis will fail.")
-            appendLine("\nOften user query is not about data itself but about the linage in that case careful analysis of context files is required to extract facts from the provided code or textual data.")
-            appendLine("Decide the next logical step to achieve the user's goal.")
+
+            appendLine("=== HOW TO WORK ===")
+            appendLine("1. Check whether the request is about **data lineage / ETL logic** or about **the data itself**.")
+            appendLine("   • If it’s lineage-related, scan the provided context/code files and extract the relevant facts.")
+            appendLine("   • If it’s data-related, load the dataset(s) and use pandas-compatible Python code.")
+            appendLine("2. Plan the *next* logical action before executing any code. If the goal or inputs are unclear, ask a clarifying question.")
+            appendLine("3. When you run Python, ALWAYS show the final answer with `print()`—no print, no credit.")
+            appendLine("4. Keep code blocks minimal: import only what you need, avoid side-effects, and label intermediate prints clearly if they’re useful.")
+            appendLine("5. After code runs, explain results in plain language the user will understand. Include key statistics/insights, not raw dumps.")
+
+            appendLine("=== BEST-PRACTICE REMINDERS ===")
+            appendLine("• Handle missing or suspect values explicitly; note any assumptions.")
+            appendLine("• For lineage questions, cite file names, function names, or line numbers so the user can trace your reasoning.")
+            appendLine("• If an operation fails, diagnose briefly and suggest a fix rather than dumping stack traces.")
+
+            appendLine("=== OUTPUT STYLE ===")
+            appendLine("• Begin with a one-sentence answer, then provide supporting details.")
+            appendLine("• Use markdown bullets or short tables for readability; avoid long prose.")
+            appendLine("• End with your proposed *next action* if further steps are required.")
+
+            appendLine("Now decide the next logical step and proceed.")
+
+            if (agentState.contextFiles.containsKey("guidelines.md")) {
+                appendLine("\nIMPORTANT: Guidelines for analysis is provided. Read them before proceeding. If it contains list of datasets load them with `load_data` tool. If it contains list of context files load them with `add_context` tool but do not read them until user asks question that requires additional context.")
+            }
 
             if (agentState.dataFiles.isNotEmpty() || agentState.contextFiles.isNotEmpty()) {
                 appendLine("\n### CURRENT STATE ###")
