@@ -1,44 +1,29 @@
 import sys
 import pandas as pd
 import json
+import io
 
-# A dictionary to hold the loaded DataFrames in memory.
-# The key is the variable name (e.g., 'sales_df') and the value is the DataFrame object.
 dataframes = {}
 
 def execute_code(code_to_exec):
-    """
-    Executes the provided code string in a global context where all loaded
-    DataFrames are available as variables.
-    """
     try:
-        # Create a dictionary of global variables to pass to exec
-        # This includes the 'pd' alias and all loaded dataframes.
         exec_globals = {
             'pd': pd,
             **dataframes
         }
-        # Execute the code. The output (from print statements) is captured by the parent process.
         exec(code_to_exec, exec_globals)
     except Exception as e:
-        # If an error occurs, print it to stderr so the agent can see it.
         print(f"PYTHON_ERROR: {e}", file=sys.stderr)
 
 def main():
-    """
-    Main loop to read commands from stdin, execute them, and print a signal
-    to indicate that execution is complete.
-    """
     for line in sys.stdin:
         try:
             command_data = json.loads(line)
-            # The 'type' field is automatically added by kotlinx.serialization for sealed classes
             command_type = command_data.get("type")
 
-            # Check for the fully qualified name of the LoadCommand
             if "LoadCommand" in command_type:
                 path = command_data.get("path")
-                var_name = command_data.get("var_name")
+                var_name = command_data.get("varName")
                 try:
                     if path.endswith('.csv'):
                         df = pd.read_csv(path)
@@ -54,16 +39,29 @@ def main():
                     dataframes[var_name] = df
                     print(f"Successfully loaded '{path}' into DataFrame '{var_name}'.")
                 except Exception as e:
-                     print(f"PYTHON_ERROR: Failed to load data from {path}. Error: {e}", file=sys.stderr)
+                    print(f"PYTHON_ERROR: Failed to load data from {path}. Error: {e}", file=sys.stderr)
 
-            # Check for the fully qualified name of the ExecuteCommand
             elif "ExecuteCommand" in command_type:
                 code = command_data.get("code")
                 execute_code(code)
+
+            elif "GetInfoCommand" in command_type:
+                var_name = command_data.get("varName")
+                df = dataframes.get(var_name)
+                if df is not None:
+                    # The complex Python logic is now encapsulated here in the kernel
+                    buffer = io.StringIO()
+                    df.info(buf=buffer)
+                    info_str = buffer.getvalue()
+                    description_str = df.describe(include='all').to_string()
+                    head_str = df.head().to_string()
+                    print(f"--- METADATA FOR {var_name} ---\n\n**Info:**\n{info_str}\n**Descriptive Statistics:**\n{description_str}\n\n**First 5 Rows:**\n{head_str}")
+                else:
+                    print(f"PYTHON_ERROR: DataFrame '{var_name}' not found.", file=sys.stderr)
+
         except json.JSONDecodeError as e:
             print(f"PYTHON_ERROR: Invalid JSON received. {e}", file=sys.stderr)
 
-        # Signal to the Kotlin process that this command has finished executing.
         print("<END_OF_OUTPUT>", flush=True)
 
 if __name__ == "__main__":

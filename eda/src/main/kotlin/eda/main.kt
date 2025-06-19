@@ -2,51 +2,62 @@ package eda
 
 import ai.jetbrains.code.prompt.executor.clients.grazie.koog.model.JetBrainsAIModels
 import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.agent.config.AIAgentConfig
 import ai.koog.agents.core.tools.Tool
 import ai.koog.agents.core.tools.ToolArgs
 import ai.koog.agents.core.tools.ToolRegistry
 import ai.koog.agents.core.tools.reflect.asTools
+import ai.koog.agents.ext.agent.ProvideStringSubgraphResult
 import ai.koog.agents.features.eventHandler.feature.handleEvents
 import ai.koog.book.utils.simpleGrazieExecutor
+import ai.koog.prompt.dsl.prompt
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.system.exitProcess
 
-private const val PYTHON_KERNEL_PATH = "eda/src/main/kernel"
+
+private const val PYTHON_KERNEL_PATH = "eda/src/main/kernel.py"
+
 
 fun main() = runBlocking {
-    // --- Kernel Process Setup ---
     if (!File(PYTHON_KERNEL_PATH).exists()) {
         println("FATAL ERROR: Python kernel script not found at '$PYTHON_KERNEL_PATH'.")
-        println("Please save the `kernel.py` file and update the PYTHON_KERNEL_PATH constant in `EdaAgent.kt`.")
+        println("Please save the `kernel.py` file and update the PYTHON_KERNEL_PATH constant in `main.kt`.")
         exitProcess(1)
     }
 
-    val process = ProcessBuilder("python", "-u", PYTHON_KERNEL_PATH)
-        .start()
+    val process = ProcessBuilder("python", "-u", PYTHON_KERNEL_PATH).start()
 
     val kernelInput = process.outputStream
     val kernelOutput = process.inputStream.bufferedReader()
 
-    // --- Agent Setup ---
-    val agentContext = AgentContext()
-    val toolset = EdaTools(agentContext, kernelInput, kernelOutput)
+    Runtime.getRuntime().addShutdownHook(Thread {
+        println("Shutting down Python kernel...")
+        process.destroy()
+    })
+
+    val toolset = EdaTools(kernelInput, kernelOutput)
     val toolRegistry = ToolRegistry {
         tools(toolset.asTools())
+        tool(ProvideStringSubgraphResult)
     }
 
-    val apiKey = System.getenv("GRAZIE_TOKEN") ?: run {
+    val apiToken = System.getenv("GRAZIE_TOKEN") ?: run {
         println("Error: GRAZIE_TOKEN environment variable not set.")
-        process.destroy()
-        return@runBlocking
+        exitProcess(1)
     }
 
     val agent = AIAgent(
-        executor = simpleGrazieExecutor(apiKey),
-        llmModel = JetBrainsAIModels.OpenAI.GPT4o,
-        systemPrompt = "You are a helpful data analysis assistant.", // This will be replaced dynamically.
+        promptExecutor = simpleGrazieExecutor(apiToken),
+        strategy = mainEdaStrategy(toolset),
+        agentConfig = AIAgentConfig(
+            prompt = prompt("eda-agent-base") {
+                system("You are an AI assistant that helps users with data analysis.")
+            },
+            model = JetBrainsAIModels.OpenAI.GPT4o,
+            maxAgentIterations = 500
+        ),
         toolRegistry = toolRegistry,
-        strategy = edaStrategy()
     ) {
         handleEvents {
             onToolCall { tool: Tool<*,*>, toolArgs: ToolArgs ->
@@ -62,74 +73,29 @@ fun main() = runBlocking {
         }
     }
 
-    // --- REPL Start ---
     println("### Interactive EDA Agent ###")
-    println("Commands: :add-data <path>, :add-context <path>, :list, :exit")
+    println("You can now ask questions or give commands in natural language.")
+    println("Examples: 'Load the dataset from ./data/sales.csv', 'what is the average price?', 'exit'")
 
     while (true) {
         print("> ")
         val userInput = readlnOrNull()?.trim() ?: break
 
-        when {
-            userInput.equals(":exit", ignoreCase = true) -> break
+        if (userInput.equals("exit", ignoreCase = true)) {
+            break
+        }
+        if (userInput.isBlank()) {
+            continue
+        }
 
-            userInput.startsWith(":add-data ") -> {
-                val path = userInput.substringAfter(":add-data ").trim()
-                println(toolset.load_data(path))
-            }
-
-            userInput.startsWith(":add-context ") -> {
-                val pathStr = userInput.substringAfter(":add-context ").trim()
-                val file = File(pathStr)
-                if (!file.exists()) {
-                    println("Error: File or directory not found at '$pathStr'")
-                } else {
-                    agentContext.contextFiles[file.name] = file.absolutePath
-                    println("Added context file: '${file.name}'")
-                }
-            }
-
-            userInput.equals(":list", ignoreCase = true) -> {
-                println(toolset.list_context())
-            }
-
-            else -> {
-                if (userInput.isBlank()) continue
-
-                // Dynamically build the system prompt with the latest context
-                val dynamicSystemPrompt = buildString {
-                    appendLine("You are an expert data analysis assistant.")
-                    if (agentContext.dataFiles.isNotEmpty()) {
-                        appendLine("\nThe following data has been loaded into pandas DataFrames:")
-                        agentContext.dataFiles.forEach { (name, path) ->
-                            appendLine("- A DataFrame named `$name` from file `$path`.")
-                        }
-                    }
-                    if (agentContext.contextFiles.isNotEmpty()) {
-                        appendLine("\nThe following context files are available for reading:")
-                        agentContext.contextFiles.forEach { (name, _) ->
-                            appendLine("- `$name`")
-                        }
-                        appendLine("Use the `read_file` tool to inspect their contents when necessary.")
-                    }
-                    appendLine("\nYour task is to answer the user's question. Use the available tools to perform your analysis.")
-                }
-
-                // Create a temporary agent with the updated prompt for this specific run
-                val tempAgent = AIAgent(
-                    executor = simpleGrazieExecutor(apiKey),
-                    llmModel = JetBrainsAIModels.OpenAI.GPT4o,
-                    systemPrompt = dynamicSystemPrompt,
-                    toolRegistry = agent.toolRegistry,
-                    strategy = edaStrategy()
-                )
-                tempAgent.run(userInput)
-            }
+        try {
+            agent.run(userInput)
+        } catch (e: Exception) {
+            println("An unexpected error occurred: ${e.message}")
+            e.printStackTrace()
         }
     }
 
-    // --- Cleanup ---
-    println("Exiting agent and shutting down kernel...")
-    process.destroy()
-    println("Session finished.")
+    println("Exiting agent...")
+    return@runBlocking
 }
