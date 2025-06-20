@@ -1,0 +1,7 @@
+Dataset files
+- path/to/dataset_1.csv
+- path/to/dataset_2.parquet
+
+Context files
+- path/to/etl.sql
+- path/to/etl.py
