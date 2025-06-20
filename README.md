@@ -13,4 +13,5 @@ EDA Agent enables data analysis through natural language commands. Built with a 
 - AI-powered understanding using GPT4.1 model
 - Interactive analysis sessions with context awareness
 - Support for various file formats (CSV, Excel, JSON, Parquet)
+- Data lineage and ETL logic analysis capabilities
 
